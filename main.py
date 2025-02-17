@@ -2,76 +2,59 @@ import json
 import numpy as np
 import random
 import nltk
+import pickle
+import telebot
 from nltk.stem import WordNetLemmatizer
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, Dropout
-from tensorflow.keras.optimizers import SGD
+# noinspection PyUnresolvedReferences
+from tensorflow.keras.models import load_model
 
 nltk.download('punkt')
 nltk.download('wordnet')
 
-# Load intents file
+# Load trained model and data
+model = load_model('chatbot_model.h5')
+words = pickle.load(open('words.pkl', 'rb'))
+classes = pickle.load(open('classes.pkl', 'rb'))
 with open('intents.json', encoding='utf-8') as file:
     intents = json.load(file)
 
 lemmatizer = WordNetLemmatizer()
-words = []
-classes = []
-documents = []
-ignore_chars = ['?', '!', '.', ',']
+TOKEN = '7062509186:AAEQMlxiPHY3wdkPr88tUhZVBqjLzHxF-BA'
+bot = telebot.TeleBot(TOKEN)
 
-# Tokenization & Lemmatization
-for intent in intents['intents']:
-    for pattern in intent['patterns']:
-        word_list = nltk.word_tokenize(pattern)
-        words.extend(word_list)
-        documents.append((word_list, intent['tag']))
-        if intent['tag'] not in classes:
-            classes.append(intent['tag'])
+def clean_up_sentence(sentence):
+    sentence_words = nltk.word_tokenize(sentence)
+    sentence_words = [lemmatizer.lemmatize(word.lower()) for word in sentence_words]
+    return sentence_words
 
-words = [lemmatizer.lemmatize(w.lower()) for w in words if w not in ignore_chars]
-words = sorted(set(words))
-classes = sorted(set(classes))
+def bow(sentence, words):
+    sentence_words = clean_up_sentence(sentence)
+    bag = [0] * len(words)
+    for w in sentence_words:
+        for i, word in enumerate(words):
+            if word == w:
+                bag[i] = 1
+    return np.array(bag)
 
-# Training Data Preparation
-training = []
-output_empty = [0] * len(classes)
+def predict_class(sentence):
+    bow_vector = bow(sentence, words)
+    res = model.predict(np.array([bow_vector]))[0]
+    ERROR_THRESHOLD = 0.25
+    results = [[i, r] for i, r in enumerate(res) if r > ERROR_THRESHOLD]
+    results.sort(key=lambda x: x[1], reverse=True)
+    return classes[results[0][0]] if results else "unknown"
 
-for doc in documents:
-    bag = []
-    word_patterns = doc[0]
-    word_patterns = [lemmatizer.lemmatize(w.lower()) for w in word_patterns]
+def get_response(intent):
+    for i in intents['intents']:
+        if i['tag'] == intent:
+            return random.choice(i['responses'])
+    return "I don't understand."
 
-    for w in words:
-        bag.append(1) if w in word_patterns else bag.append(0)
+@bot.message_handler(func=lambda message: True)
+def handle_message(message):
+    intent = predict_class(message.text)
+    response = get_response(intent)
+    bot.reply_to(message, response)
 
-    output_row = list(output_empty)
-    output_row[classes.index(doc[1])] = 1
-    training.append([bag, output_row])
-
-random.shuffle(training)
-training = np.array(training, dtype=object)
-X_train = np.array(list(training[:, 0]))
-y_train = np.array(list(training[:, 1]))
-
-# Build Neural Network Model
-model = Sequential([
-    Dense(128, input_shape=(len(X_train[0]),), activation='relu'),
-    Dropout(0.5),
-    Dense(64, activation='relu'),
-    Dropout(0.5),
-    Dense(len(classes), activation='softmax')
-])
-
-sgd = SGD(learning_rate=0.01, momentum=0.9, nesterov=True)
-model.compile(loss='categorical_crossentropy', optimizer=sgd, metrics=['accuracy'])
-
-# Train the model
-model.fit(X_train, y_train, epochs=200, batch_size=5, verbose=1)
-model.save('chatbot_model.h5')
-
-# Save data
-import pickle
-
-pickle.dump(words, open('words.pkl', 'wb'))
-pickle.dump(classes, open('classes.pkl', 'wb'))
+print("Bot is running...")
+bot.polling()
